@@ -202,9 +202,16 @@ button { cursor: pointer; }
 .btn.big { min-height: 54px; padding: .8em 1.6em; font-size: 1.1rem; }
 .btn svg { width: 1.15em; height: 1.15em; flex: none; }
 .btn[disabled], .btn[aria-disabled="true"] { opacity: .4; pointer-events: none; }
-.btn.pulse { animation: btnPulse 1.8s ease-in-out infinite; }
-@keyframes btnPulse { 0%, 100% { box-shadow: 0 0 0 0 var(--glow); } 50% { box-shadow: 0 0 0 8px transparent; } }
-@media (prefers-reduced-motion: reduce) { .btn.pulse { animation: none; } }
+/* "Ping" rings animate only transform and opacity, so the GPU moves them without repainting the
+   page. (Animating box-shadow forced a full repaint every frame on every screen.) */
+.btn.pulse { position: relative; }
+.btn.pulse::after, .step.next .n::after {
+  content: ""; position: absolute; inset: -2px; border-radius: inherit; pointer-events: none;
+  box-shadow: 0 0 0 6px var(--glow); opacity: 0; will-change: transform, opacity;
+  animation: ping 2s cubic-bezier(.2, .6, .3, 1) infinite;
+}
+@keyframes ping { 0% { opacity: 0; transform: scale(.9); } 18% { opacity: 1; } 100% { opacity: 0; transform: scale(1.22); } }
+@media (prefers-reduced-motion: reduce) { .btn.pulse::after, .step.next .n::after { animation: none; } }
 .iconbtn {
   display: inline-grid; place-items: center; width: 42px; height: 42px; border-radius: 999px; flex: none;
   border: 1.5px solid var(--line-strong); background: var(--panel); color: var(--ink);
@@ -258,7 +265,7 @@ button.chip:hover, a.chip:hover { color: var(--ink); border-color: var(--ink-3);
 }
 .step:hover { background: var(--active-bg); color: var(--ink); }
 .step .n {
-  width: 32px; height: 32px; border-radius: 99px; display: grid; place-items: center; z-index: 1;
+  position: relative; width: 32px; height: 32px; border-radius: 99px; display: grid; place-items: center; z-index: 1;
   background: var(--panel); border: 2px solid var(--line-strong); color: var(--ink-2);
   font-family: var(--font-display); font-weight: 800; font-size: .9rem;
 }
@@ -268,9 +275,7 @@ button.chip:hover, a.chip:hover { color: var(--ink); border-color: var(--ink-3);
 .step .t span { font-size: .82rem; color: var(--ink-3); }
 .step .tag { font-family: var(--font-mono); font-size: .72rem; font-weight: 700; color: var(--ink-3); }
 .step.done .n { background: var(--good); border-color: var(--good); color: #fff; }
-.step.next .n { border-color: var(--ink); color: var(--ink); animation: nextPulse 2.2s ease-in-out infinite; }
-@keyframes nextPulse { 0%, 100% { box-shadow: 0 0 0 0 var(--glow); } 50% { box-shadow: 0 0 0 7px transparent; } }
-@media (prefers-reduced-motion: reduce) { .step.next .n { animation: none; } }
+.step.next .n { border-color: var(--ink); color: var(--ink); }
 .step[aria-current="page"] { background: var(--active-bg); border-color: var(--line-strong); box-shadow: var(--shadow); }
 .step[aria-current="page"] .n { background: var(--ink); border-color: var(--ink); color: var(--bg); }
 .step.done[aria-current="page"] .n { background: var(--good); border-color: var(--good); color: #fff; }
@@ -2680,7 +2685,15 @@ I46.BANDS_RAW={
     }
     if (this.particles.length) needMore = true;
     if (this.float || this.continuous || this.hasPulse || this.ft < 1700) needMore = true;
-    if (this.visible) this.draw();
+    // While holding on a step with nothing moving fast (only the slow camera drift, float and glow),
+    // draw about 30 times a second instead of every frame: it looks the same and halves the work.
+    var idle = (this.continuous || this.float) && this.phase === 'hold' && !this.particles.length && !this.dragging && this.ft >= 1700;
+    if (this.visible && (!idle || ts - (this._drawnAt || 0) >= 30)) {
+      // watchdog: the gap between two drawn frames shows how long drawing takes on this machine
+      if (this.view && this._drewLast && !idle) this.view.perf(dt);
+      this._drawnAt = ts; this._drewLast = true;
+      this.draw();
+    } else this._drewLast = false;
     if (needMore && this.visible && !I46.reduced()) this.raf = requestAnimationFrame(this._loop);
   };
 
@@ -3571,7 +3584,8 @@ I46.BANDS_RAW={
     this.canvas = canvas; this.o = o;
     var r = this.renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
     r.setClearColor(0x000000, 1);
-    this.dprCap = o.maxDpr || 1.5; this.quality = 2; this.slow = 0; this.ema = 0;
+    // quality steps down on slow machines: 3 full, 2 plain resolution, 1 no bloom, 0 reduced resolution
+    this.dprCap = o.maxDpr || 1.5; this.quality = 3; this.slow = 0; this.ema = 0;
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(o.fov || 30, 1, 1, 10000);
     this.hemi = new THREE.HemisphereLight(0xffffff, 0xcfc6e2, .72);
@@ -3583,7 +3597,7 @@ I46.BANDS_RAW={
   }
   GLView.prototype.fit = function () {
     var rc = this.canvas.getBoundingClientRect(), w = Math.max(1, Math.round(rc.width)), h = Math.max(1, Math.round(rc.height));
-    var dpr = Math.min(window.devicePixelRatio || 1, this.quality >= 2 ? this.dprCap : 1);
+    var dpr = Math.min(window.devicePixelRatio || 1, this.quality >= 3 ? this.dprCap : (this.quality >= 1 ? 1 : .7));
     if (w !== this.w || h !== this.h || dpr !== this.dpr) {
       this.w = w; this.h = h; this.dpr = dpr;
       this.renderer.setPixelRatio(dpr); this.renderer.setSize(w, h, false);
@@ -3605,7 +3619,7 @@ I46.BANDS_RAW={
     }
     return true;
   };
-  GLView.prototype.bloomOn = function () { return !!(this.dark && this.quality >= 1 && this.o.bloom !== false && GL.bloomOk()); };
+  GLView.prototype.bloomOn = function () { return !!(this.dark && this.quality >= 2 && this.o.bloom !== false && GL.bloomOk()); };
   GLView.prototype.render = function () {
     if (this.bloomOn()) {
       if (!this.composer) this.makeComposer();
@@ -3620,11 +3634,12 @@ I46.BANDS_RAW={
     this.bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(this.w, this.h), b.strength || .9, b.radius || .55, b.threshold === undefined ? .2 : b.threshold);
     c.addPass(this.bloomPass);
   };
-  /** frame-time watchdog: drop resolution, then bloom, on slow machines */
+  /** Frame-time watchdog: if frames keep arriving slower than about 45 per second, drop resolution,
+      then bloom, then resolution again. dt is the time between two frames that were both drawn. */
   GLView.prototype.perf = function (dt) {
     if (dt <= 0 || dt > 250) return;
     this.ema = this.ema ? this.ema * .94 + dt * .06 : dt;
-    if (this.ema > 42) { if (++this.slow > 100 && this.quality > 0) { this.quality--; this.slow = 0; this.ema = 0; } }
+    if (this.ema > 22) { if (++this.slow > 90 && this.quality > 0) { this.quality--; this.slow = 0; this.ema = 0; } }
     else this.slow = 0;
   };
   GLView.prototype.dispose = function () {
@@ -3863,7 +3878,6 @@ I46.BANDS_RAW={
     this.applyTheme(dark);
     var now = this.clock, dt = this._lc === undefined ? 16 : Math.min(100, now - this._lc);
     this._lc = now;
-    if (dt > 0 && this.visible) v.perf(dt);
 
     var comp = this.compose(), fr = comp.B, frA = comp.A, e = comp.e;
     var cam = U.camLerp(frA && this.phase === 'tween' ? frA.cam : fr.cam, fr.cam, e, W, H);
@@ -7263,15 +7277,23 @@ I46.BANDS_RAW={
     var raf = 0, visible = true, t0 = performance.now();
     var per = 1, N = n;
     if (N > 100000) { per = Math.ceil(N / 100000); N = Math.round(N / per); }
-    function draw(now) {
-      var fc = I46.fitCanvas(canvas), ctx = fc.ctx, w = fc.w, hh = fc.h, dark = I46.isDark();
+    // The field can hold 100,000 dots, so it is drawn once into a cache and only the small square
+    // around the glowing dot is redrawn each frame. (Redrawing every dot each frame saturated the GPU.)
+    var cache = null, key = '', lay = null;
+    function field(w, hh, dpr, dark) {
+      var k = [w, hh, dpr, dark, color].join('|');
+      if (k === key) return;
+      key = k; I46._dotsBuilds = (I46._dotsBuilds || 0) + 1;
+      cache = cache || document.createElement('canvas');
+      cache.width = Math.round(w * dpr); cache.height = Math.round(hh * dpr);
+      var ctx = cache.getContext('2d');
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, hh);
       var pad = 8, W = w - pad * 2, H = hh - pad * 2;
       var cell = Math.sqrt(W * H / N), cols = Math.max(1, Math.floor(W / cell)), rows = Math.ceil(N / cols);
       cell = Math.min(W / cols, H / rows);
       var ox = pad + (W - cols * cell) / 2, oy = pad + (H - rows * cell) / 2;
-      var base = dark ? 'rgba(143,163,255,.34)' : 'rgba(90,45,140,.30)';
-      ctx.fillStyle = base;
+      ctx.fillStyle = dark ? 'rgba(143,163,255,.34)' : 'rgba(90,45,140,.30)';
       if (cell >= 3) {
         var r = cell * .3;
         ctx.beginPath();
@@ -7281,10 +7303,29 @@ I46.BANDS_RAW={
         var sz = Math.max(.6, cell * .62);
         for (var j = 0; j < N; j++) ctx.fillRect(ox + (j % cols) * cell, oy + Math.floor(j / cols) * cell, sz, sz);
       }
-      var k = Math.floor(N * .618) % N, hx = ox + (k % cols + .5) * cell, hy = oy + (Math.floor(k / cols) + .5) * cell;
-      var ph = ((now - t0) / 1600) % 1;
+      var kk = Math.floor(N * .618) % N;
+      lay = { hx: ox + (kk % cols + .5) * cell, hy: oy + (Math.floor(kk / cols) + .5) * cell, rr: Math.max(3.2, cell * .45) };
+      lay.box = Math.ceil(Math.max(lay.rr * 3.4, lay.rr + 18) + 3);
+      lay.full = true;
+    }
+    function draw(now) {
+      raf = 0;
+      var fc = I46.fitCanvas(canvas), ctx = fc.ctx, w = fc.w, hh = fc.h, dark = I46.isDark(), dpr = fc.dpr;
+      var before = key;
+      field(w, hh, dpr, dark);
       var col = color || (dark ? '#FF4FA0' : '#C21D6E');
-      var rr = Math.max(3.2, cell * .45);
+      var hx = lay.hx, hy = lay.hy, rr = lay.rr, bx = lay.box;
+      if (lay.full || before !== key) {
+        ctx.clearRect(0, 0, w, hh);
+        ctx.drawImage(cache, 0, 0, cache.width, cache.height, 0, 0, w, hh);
+        lay.full = false;
+      } else {
+        // restore just the square around the glowing dot from the cached field
+        var x0 = Math.max(0, hx - bx), y0 = Math.max(0, hy - bx), x1 = Math.min(w, hx + bx), y1 = Math.min(hh, hy + bx);
+        ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+        ctx.drawImage(cache, x0 * dpr, y0 * dpr, (x1 - x0) * dpr, (y1 - y0) * dpr, x0, y0, x1 - x0, y1 - y0);
+      }
+      var ph = ((now - t0) / 1600) % 1;
       if (!I46.reduced()) {
         ctx.beginPath(); ctx.arc(hx, hy, rr + ph * 18, 0, Math.PI * 2);
         ctx.strokeStyle = C.rgba(col, (1 - ph) * .8); ctx.lineWidth = 2; ctx.stroke();
@@ -7295,10 +7336,11 @@ I46.BANDS_RAW={
       ctx.fillStyle = col; ctx.beginPath(); ctx.arc(hx, hy, rr, 0, Math.PI * 2); ctx.fill();
       if (visible && !I46.reduced() && canvas.isConnected) raf = requestAnimationFrame(draw);
     }
-    var off = I46.onVisible(canvas, function (v) { visible = v; if (v) { cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); } });
-    var offT = I46.bus.on('theme', function () { requestAnimationFrame(draw); });
-    requestAnimationFrame(draw);
-    return { per: per, destroy: function () { cancelAnimationFrame(raf); off(); offT(); } };
+    function kick() { if (!raf) raf = requestAnimationFrame(draw); }
+    var off = I46.onVisible(canvas, function (v) { visible = v; if (v) { if (lay) lay.full = true; kick(); } });
+    var offT = I46.bus.on('theme', function () { key = ''; kick(); });
+    kick();
+    return { per: per, destroy: function () { cancelAnimationFrame(raf); raf = 0; off(); offT(); } };
   }
 
   // ---------- body systems constellation ----------
