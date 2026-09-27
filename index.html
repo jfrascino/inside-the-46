@@ -2092,12 +2092,20 @@ var I46 = window.I46 = {};
     return { ctx: ctx, w: w, h: hh, dpr: dpr };
   }
 
-  /** Observe visibility so animations only run on screen */
+  /** Observe visibility so animations only run on screen. A lesson layer that has faded out (a .layer
+      without .on) counts as hidden too: it still has a size, so IntersectionObserver alone would keep
+      its animation running unseen. Lessons emit 'layers' whenever they switch layers. */
   function onVisible(el, cb) {
-    if (!('IntersectionObserver' in window)) { cb(true); return function () {}; }
-    var io = new IntersectionObserver(function (entries) { entries.forEach(function (e) { cb(e.isIntersecting); }); }, { rootMargin: '80px' });
+    var inView = true, last = null;
+    function report() {
+      var v = inView && !(el.closest && el.closest('.layer:not(.on)'));
+      if (v !== last) { last = v; cb(v); }
+    }
+    var offL = bus.on('layers', report);
+    if (!('IntersectionObserver' in window)) { report(); return offL; }
+    var io = new IntersectionObserver(function (entries) { entries.forEach(function (e) { inView = e.isIntersecting; }); report(); }, { rootMargin: '80px' });
     io.observe(el);
-    return function () { io.disconnect(); };
+    return function () { io.disconnect(); offL(); };
   }
 
   // ---------- theme ----------
@@ -2685,10 +2693,13 @@ I46.BANDS_RAW={
     }
     if (this.particles.length) needMore = true;
     if (this.float || this.continuous || this.hasPulse || this.ft < 1700) needMore = true;
-    // While holding on a step with nothing moving fast (only the slow camera drift, float and glow),
-    // draw about 30 times a second instead of every frame: it looks the same and halves the work.
-    var idle = (this.continuous || this.float) && this.phase === 'hold' && !this.particles.length && !this.dragging && this.ft >= 1700;
-    if (this.visible && (!idle || ts - (this._drawnAt || 0) >= 30)) {
+    // Holding on a step with nothing moving fast: a 3D (or floating) stage only has its slow camera
+    // drift, float and glow left, so it draws about 30 times a second (looks the same, half the work).
+    // A flat 2D stage with no pulsing highlight is completely still, so it doesn't redraw at all.
+    var still = this.phase === 'hold' && !this.particles.length && !this.dragging && this.ft >= 1700;
+    var idle = still && (this.continuous || this.float);
+    if (still && !idle && !this.hasPulse) { this._drewLast = false; }
+    else if (this.visible && (!idle || ts - (this._drawnAt || 0) >= 30)) {
       // watchdog: the gap between two drawn frames shows how long drawing takes on this machine
       if (this.view && this._drewLast && !idle) this.view.perf(dt);
       this._drawnAt = ts; this._drewLast = true;
@@ -2925,11 +2936,12 @@ I46.BANDS_RAW={
     return g;
   };
 
-  function piecePath(ctx, L, ht, hb, capTop, capBot) {
+  /** keep = add to the current path instead of starting a new one (to fill many pieces at once) */
+  function piecePath(ctx, L, ht, hb, capTop, capBot, keep) {
     var ext = .45, y0 = -L / 2 - (capTop ? 0 : ext), y1 = L / 2 + (capBot ? 0 : ext);
     var both = capTop && capBot, maxR = both ? L / 2 : L;
     var rt = Math.min(ht, maxR), rb = Math.min(hb, maxR);
-    ctx.beginPath();
+    if (!keep) ctx.beginPath();
     if (capTop) { ctx.moveTo(-ht, y0 + rt); ctx.ellipse(0, y0 + rt, ht, rt, 0, Math.PI, 2 * Math.PI); }
     else { ctx.moveTo(-ht, y0); ctx.lineTo(ht, y0); }
     if (capBot) { ctx.lineTo(hb, y1 - rb); ctx.ellipse(0, y1 - rb, hb, rb, 0, 0, Math.PI); }
@@ -2983,19 +2995,32 @@ I46.BANDS_RAW={
       ctx.beginPath(); ctx.moveTo(en.top[0], en.top[1] + w * .3); ctx.lineTo(en.bottom[0], en.bottom[1] - w * .3); ctx.stroke();
       ctx.restore();
     });
-    // glow pass for highlighted pieces
+    // glow pass for highlighted pieces. Pieces that share a colour, pulse and fade are filled as ONE
+    // shape, so the browser blurs once per highlight instead of once per band (a shadow blur is costly,
+    // and a highlighted chromosome can have dozens of bands).
     var pulse = .55 + .45 * Math.sin(this.clock / 260);
     this.hasPulse = false;
+    var glows = {}, order = [];
     pcs.forEach(function (p) {
       if (!p.hl || p.alpha <= .01) return;
       if (p.pulse) self.hasPulse = true;
+      var a = p.alpha * (p.hlFade === undefined ? 1 : p.hlFade), key = p.hl + '|' + (p.pulse ? 1 : 0) + '|' + a.toFixed(2);
+      if (!glows[key]) { glows[key] = { hl: p.hl, pulse: p.pulse, a: a, list: [] }; order.push(key); }
+      glows[key].list.push(p);
+    });
+    order.forEach(function (key) {
+      var g = glows[key];
       ctx.save();
-      ctx.globalAlpha = p.alpha * (p.hlFade === undefined ? 1 : p.hlFade);
-      ctx.translate(p.cx, p.cy); ctx.rotate(p.ang);
-      ctx.shadowColor = p.hl; ctx.shadowBlur = (dark ? 28 : 18) * (p.pulse ? pulse : 1) * k * cam.z;
-      var hw = p.w / 2;
-      piecePath(ctx, p.len, hw * p.top, hw * p.bot, p.capTop, p.capBot);
-      ctx.fillStyle = p.hl; ctx.fill();
+      ctx.globalAlpha = g.a;
+      ctx.shadowColor = g.hl; ctx.shadowBlur = (dark ? 28 : 18) * (g.pulse ? pulse : 1) * k * cam.z;
+      ctx.beginPath();
+      g.list.forEach(function (p) {
+        var hw = p.w / 2;
+        ctx.save(); ctx.translate(p.cx, p.cy); ctx.rotate(p.ang);
+        piecePath(ctx, p.len, hw * p.top, hw * p.bot, p.capTop, p.capBot, true);
+        ctx.restore();
+      });
+      ctx.fillStyle = g.hl; ctx.fill();
       ctx.restore();
     });
     pcs.forEach(function (p) {
@@ -4012,13 +4037,14 @@ I46.BANDS_RAW={
     });
   };
 
+  var underUid = 0;
   /** "under" layers (like the mosaic tissue) are painted to a texture on the slide plane */
   Stage3D.prototype.under3 = function (fr, frA, e, dark, info) {
     var tweenA = frA && frA.under && frA.under !== fr.under && this.phase === 'tween' && e < 1;
     if (!fr.under && !tweenA) { if (this.underMesh) this.underMesh.visible = false; return; }
     var W = this.W, H = this.H;
     if (this.underMesh && (this.underW !== W || this.underH !== H)) {
-      this.view.scene.remove(this.underMesh); this.underMesh.geometry.dispose(); this.underMesh.material.dispose(); this.underTex.dispose(); this.underMesh = null;
+      this.view.scene.remove(this.underMesh); this.underMesh.geometry.dispose(); this.underMesh.material.dispose(); this.underTex.dispose(); this.underMesh = null; this.underKey = null;
     }
     if (!this.underMesh) {
       this.underW = W; this.underH = H;
@@ -4031,6 +4057,11 @@ I46.BANDS_RAW={
       this.underMesh.position.z = -4; this.underMesh.renderOrder = 0;
       this.view.scene.add(this.underMesh);
     }
+    // the tissue only changes while a step is changing: skip redrawing (and re-uploading) an unchanged texture
+    var sid = this.scene._uid || (this.scene._uid = ++underUid);
+    var key = [sid, this.fi, this.phase === 'tween' ? e.toFixed(3) : 'hold', dark, W, H, tweenA ? 1 : 0].join('|');
+    if (key === this.underKey) { this.underMesh.visible = true; return; }
+    this.underKey = key;
     var c2 = this.underCanvas.getContext('2d'), s = this.underCanvas.width / W;
     c2.setTransform(1, 0, 0, 1, 0, 0);
     c2.clearRect(0, 0, this.underCanvas.width, this.underCanvas.height);
@@ -7689,6 +7720,8 @@ I46.BANDS_RAW={
     // visual
     var name = part.layer, obj = this.layer(name);
     for (var k in this.hosts) this.hosts[k].classList.toggle('on', k === name);
+    // layers that just faded out stop animating; the one shown starts (see I46.onVisible)
+    I46.bus.emit('layers');
     if (cfg.layers[name].show) cfg.layers[name].show(obj, part.arg, part, instant);
     for (var k2 in this.objs) if (k2 !== name && cfg.layers[k2].hide) cfg.layers[k2].hide(this.objs[k2]);
     if (cfg.onPart) cfg.onPart(i, part);
