@@ -3388,11 +3388,11 @@ I46.BANDS_RAW={
           'float dn = snoise(wp0 * uBumpF);\n' +
           (cap ? 'transformed *= 1.0 + uDisp * dn;\n' : 'transformed.xz *= 1.0 + uDisp * dn;\n') +
           'vWP = wp0; vEmit = aEmit; vFade = aFade;');
-      var fh = 'varying vec3 vEmit;\nvarying float vFade;\nvarying vec3 vWP;\nuniform float uBumpF;\nuniform float uBumpA;\nuniform float uRimDark;\nuniform float uRimGlow;\nuniform vec3 uEdge;\n' + NOISE + '\n' + PERTURB + '\n';
+      var fh = 'varying vec3 vEmit;\nvarying float vFade;\nvarying vec3 vWP;\nuniform float uBumpF;\nuniform float uBumpA;\nuniform float uRimDark;\nuniform float uRimGlow;\nuniform float uSpeck;\nuniform vec3 uEdge;\n' + NOISE + '\n' + PERTURB + '\n';
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', '#include <common>\n' + fh)
         .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\nfloat nf = snoise(vWP * 0.085) * 0.5 + 0.5;\nif (vFade < 0.999 && nf > vFade) discard;')
-        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= 0.92 + 0.1 * snoise(vWP * uBumpF * 2.2);')
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= 1.0 - uSpeck * 0.8 + uSpeck * snoise(vWP * uBumpF * 2.2);')
         .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\nfloat hb = snoise(vWP * uBumpF * 1.3) + 0.35 * snoise(vWP * uBumpF * 3.1);\nnormal = i46Perturb(-vViewPosition, normal, vec2(dFdx(hb), dFdy(hb)) * uBumpA, faceDirection);')
         .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vEmit;\nif (vFade < 0.999) totalEmissiveRadiance += uEdge * smoothstep(vFade - 0.12, vFade, nf);')
         .replace('#include <output_fragment>', 'float rim = 1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);\nrim *= rim;\noutgoingLight = outgoingLight * (1.0 - uRimDark * rim) + diffuseColor.rgb * uRimGlow * rim;\n#include <output_fragment>');
@@ -3417,7 +3417,7 @@ I46.BANDS_RAW={
     this.parent = parent;
     this.u = {
       uBumpF: { value: .1 }, uBumpA: { value: 2 }, uDisp: { value: .07 },
-      uRimDark: { value: .35 }, uRimGlow: { value: 0 }, uEdge: { value: new THREE.Color(1, 1, 1) }
+      uRimDark: { value: .35 }, uRimGlow: { value: 0 }, uEdge: { value: new THREE.Color(1, 1, 1) }, uSpeck: { value: .1 }
     };
     this.tubeGeo = new THREE.CylinderGeometry(1, 1, 1, 16, 4, true);
     this.capGeo = new THREE.SphereGeometry(1, 16, 10);
@@ -3493,10 +3493,13 @@ I46.BANDS_RAW={
     if (this.overT) this.allocT(Math.ceil((this.capT + this.overT) * 1.5));
     if (this.overC) this.allocC(Math.ceil((this.capC + this.overC) * 1.5));
   };
-  ChromoBatch.prototype.setBump = function (radius) {
-    var f = 1.15 / Math.max(.3, radius);
+  /** amp scales the knobbly surface (1 = default); calmer views use less so bloom doesn't sparkle */
+  ChromoBatch.prototype.setBump = function (radius, amp) {
+    var f = 1.15 / Math.max(.3, radius), k = amp === undefined ? 1 : amp;
     this.u.uBumpF.value = f;
-    this.u.uBumpA.value = .085 / f;
+    this.u.uBumpA.value = .085 / f * k;
+    this.u.uSpeck.value = .1 * k;
+    this.u.uDisp.value = .07 * k;
   };
   ChromoBatch.prototype.theme = function (dark) {
     this.u.uRimDark.value = dark ? 0 : .34;
@@ -3694,6 +3697,19 @@ I46.BANDS_RAW={
     var dx = bx - ax, dy = by - ay, dz = bz - az, L = Math.sqrt(dx * dx + dy * dy + dz * dz);
     if (L < 1e-3) return;
     var nx = dx / L, ny = dy / L, nz = dz / L;
+    // A piece shorter than its own cap (a short tip band, or the small satellite knob on
+    // chromosomes 13, 14, 15, 21 and 22) is drawn as a round knob. Squeezing the cap into the
+    // piece's length used to flatten it into a thin disc that looked detached.
+    var rk = Math.max(capT ? rT : 0, capB ? rB : 0);
+    if (capT && capB && L < rT + rB) {
+      sink.cap(ax + dx / 2, ay + dy / 2, az + dz / 2, nx, ny, nz, rk * .8, Math.max(L / 2, rk * .7), cr, cg, cb, er, eg, eb, fade, tag);
+      return;
+    }
+    if (capT !== capB && L < rk) {
+      if (capT) sink.cap(ax + nx * rT, ay + ny * rT, az + nz * rT, nx, ny, nz, rT, rT, cr, cg, cb, er, eg, eb, fade, tag);
+      else sink.cap(bx - nx * rB, by - ny * rB, bz - nz * rB, nx, ny, nz, rB, rB, cr, cg, cb, er, eg, eb, fade, tag);
+      return;
+    }
     var maxR = capT && capB ? L / 2 : L;
     var rtA = capT ? Math.min(rT, maxR) : 0, rbA = capB ? Math.min(rB, maxR) : 0;
     var t0 = capT ? rtA : -ext, t1 = L - (capB ? rbA : -ext);
@@ -4103,7 +4119,7 @@ I46.BANDS_RAW={
                condensed chromosomes → karyotype → DNA. go(n) flies to stop n (0–5). */
 (function () {
   'use strict';
-  var GL = I46.GL, M = I46.M, CH = I46.chrom, CHR = I46.CHR, U = I46.stageUtil;
+  var GL = I46.GL, M = I46.M, CH = I46.chrom, CHR = I46.CHR, U = I46.stageUtil, C = I46.color;
 
   /** requestAnimationFrame loop that sleeps while its element is off screen or the tab is hidden */
   function Loop(el, fn) {
@@ -4263,6 +4279,7 @@ I46.BANDS_RAW={
 
   // ======================================================================= JOURNEY
   var NUC = 40;          // nucleus radius (world units)
+  var BANDK = { n: 0, '1': .12, '2': .24, '3': .36, '4': .48, c: .1, v: .4, s: .55 };  // band darkness by stain
   var SC_SPREAD = .082;  // chromosome scale in the nucleus (units per million base pairs)
   var CW = 2.7;          // chromosome width
 
@@ -4275,22 +4292,23 @@ I46.BANDS_RAW={
     });
   }
 
-  /** chromatin threads: one tube per chromosome whose path is computed on the GPU and
-      tightens from a loose tangle into a short coiled rod as uCond goes 0 → 1 */
+  /** chromatin threads: one tube per chromosome whose path is computed on the GPU. Each thread
+      loops around inside its own "chromosome territory" (a region of the nucleus, as seen in real
+      3D chromosome-painting images), then tightens into a short coiled rod as uCond goes 0 → 1. */
   function threadMat() {
     return new THREE.ShaderMaterial({
       extensions: { derivatives: true },
       uniforms: { uCond: { value: 0 }, uTime: { value: 0 }, uR: { value: NUC }, uW: { value: CW * .5 }, uThin: { value: .28 }, uFade: { value: 1 }, uDark: { value: 1 } },
       vertexShader: [
-        'attribute vec4 aSeed;', 'attribute vec3 aStart;', 'attribute vec3 aCen;', 'attribute vec3 aDir;', 'attribute float aLen;', 'attribute vec3 aCol;',
+        'attribute vec4 aSeed;', 'attribute vec3 aStart;', 'attribute float aTerr;', 'attribute vec3 aCen;', 'attribute vec3 aDir;', 'attribute float aLen;', 'attribute vec3 aCol;',
         'uniform float uCond;', 'uniform float uTime;', 'uniform float uR;', 'uniform float uW;', 'uniform float uThin;',
         'varying vec3 vCol;', 'varying vec3 vN;', 'varying vec3 vV;', 'varying vec3 vWP;',
         'vec3 tangled(float t){',
-        ' vec3 p = aStart; float a = t * 6.2831;',
-        ' p.x += uR * 0.3 * (sin(a * (1.3 + aSeed.x) + aSeed.y * 6.28 + uTime * 0.21) + 0.6 * sin(a * (3.1 + aSeed.z * 2.0) + aSeed.w * 6.28));',
-        ' p.y += uR * 0.3 * (sin(a * (1.7 + aSeed.y) + aSeed.z * 6.28 + uTime * 0.17) + 0.6 * sin(a * (2.7 + aSeed.x * 2.0) + aSeed.x * 6.28));',
-        ' p.z += uR * 0.24 * (sin(a * (1.1 + aSeed.z) + aSeed.x * 6.28 + uTime * 0.19) + 0.6 * sin(a * (3.5 + aSeed.w * 2.0) + aSeed.y * 6.28));',
-        ' float l = length(p); if (l > uR * 0.88) p *= uR * 0.88 / l;',
+        ' vec3 p = aStart; float a = t * 6.2831, R = aTerr;',
+        ' p.x += R * 0.5 * (sin(a * (6.0 + aSeed.x * 4.0) + aSeed.y * 6.28 + uTime * 0.21) + 0.5 * sin(a * (15.0 + aSeed.z * 6.0) + aSeed.w * 6.28));',
+        ' p.y += R * 0.5 * (sin(a * (7.0 + aSeed.y * 4.0) + aSeed.z * 6.28 + uTime * 0.17) + 0.5 * sin(a * (17.0 + aSeed.x * 6.0) + aSeed.x * 6.28));',
+        ' p.z += R * 0.42 * (sin(a * (5.0 + aSeed.z * 4.0) + aSeed.x * 6.28 + uTime * 0.19) + 0.5 * sin(a * (13.0 + aSeed.w * 6.0) + aSeed.y * 6.28));',
+        ' float l = length(p); if (l > uR * 0.9) p *= uR * 0.9 / l;',
         ' return p;',
         '}',
         'vec3 condensed(float t, float c){',
@@ -4318,7 +4336,7 @@ I46.BANDS_RAW={
         ' gl_Position = projectionMatrix * mv;',
         '}'
       ].join('\n'),
-      fragmentShader: 'uniform float uFade;\nuniform float uDark;\nvarying vec3 vCol;\nvarying vec3 vN;\nvarying vec3 vV;\nvarying vec3 vWP;\n' + GL.NOISE + '\nvoid main(){ float nf = snoise(vWP * 0.35) * 0.5 + 0.5; if (uFade < 0.999 && nf > uFade) discard; vec3 n = normalize(vN); vec3 v = normalize(vV); float lam = 0.42 + 0.58 * max(dot(n, normalize(vec3(-0.4, 0.7, 0.6))), 0.0); float rim = pow(1.0 - abs(dot(n, v)), 2.0); vec3 col = uDark > 0.5 ? vCol * (0.55 * lam + 0.55 * rim + 0.18) : vCol * lam * (1.0 - 0.3 * rim); if (uFade < 0.999) col += vec3(1.0) * smoothstep(uFade - 0.1, uFade, nf) * 0.8; gl_FragColor = vec4(col, 1.0); }'
+      fragmentShader: 'uniform float uFade;\nuniform float uDark;\nvarying vec3 vCol;\nvarying vec3 vN;\nvarying vec3 vV;\nvarying vec3 vWP;\n' + GL.NOISE + '\nvoid main(){ float nf = snoise(vWP * 0.35) * 0.5 + 0.5; if (uFade < 0.999 && nf > uFade) discard; vec3 n = normalize(vN); vec3 v = normalize(vV); float lam = 0.42 + 0.58 * max(dot(n, normalize(vec3(-0.4, 0.7, 0.6))), 0.0); float rim = pow(1.0 - abs(dot(n, v)), 2.0); vec3 col = uDark > 0.5 ? vCol * (0.4 * lam + 0.42 * rim + 0.1) : vCol * (0.72 + 0.38 * lam) * (1.0 - 0.12 * rim); if (uFade < 0.999) col += vCol * smoothstep(uFade - 0.1, uFade, nf) * 0.25; gl_FragColor = vec4(col, 1.0); }'
     });
   }
 
@@ -4436,17 +4454,26 @@ I46.BANDS_RAW={
     this.batch = new GL.Batch(S, 3200, 520);
 
     // --- threads
-    var tg = new THREE.CylinderGeometry(1, 1, 1, 7, 150, true), n = this.bodies.length;
+    var tg = new THREE.CylinderGeometry(1, 1, 1, 7, 260, true), n = this.bodies.length;
     function ia(name, size) { var a = new THREE.InstancedBufferAttribute(new Float32Array(n * size), size); a.setUsage(THREE.DynamicDrawUsage); tg.setAttribute(name, a); return a; }
-    this.tA = { seed: ia('aSeed', 4), start: ia('aStart', 3), cen: ia('aCen', 3), dir: ia('aDir', 3), len: ia('aLen', 1), col: ia('aCol', 3) };
+    this.tA = { seed: ia('aSeed', 4), start: ia('aStart', 3), terr: ia('aTerr', 1), cen: ia('aCen', 3), dir: ia('aDir', 3), len: ia('aLen', 1), col: ia('aCol', 3) };
+    // territory: centred where the chromosome will condense (spread a little deeper in z), sized
+    // by chromosome length, so the loose thread and the packed chromosome share one place
     this.bodies.forEach(function (b, i) {
+      var tc = b.spread.clone(); tc.z *= 2.1;
+      if (tc.length() > NUC * .7) tc.multiplyScalar(NUC * .7 / tc.length());
+      b.terr = tc; b.terrR = 5.2 + 5.6 * Math.cbrt(CHR[b.c].len / 249);
       self.tA.seed.array.set(b.seed, i * 4);
-      self.tA.start.array.set([b.start.x, b.start.y, b.start.z], i * 3);
+      self.tA.start.array.set([tc.x, tc.y, tc.z], i * 3);
+      self.tA.terr.array[i] = b.terrR;
     });
     this.threadMat = threadMat();
+    this.threadMat.uniforms.uThin.value = .2;
     this.threads = new THREE.InstancedMesh(tg, this.threadMat, n);
     this.threads.frustumCulled = false;
     S.add(this.threads);
+
+    this.glow = new GL.Glow(S, 64);
 
     // --- DNA
     this.helix = helixBuild();
@@ -4547,7 +4574,7 @@ I46.BANDS_RAW={
     // critically damped approach to the goal (exact solution, so it is stable at any frame rate)
     if (reduced) { this.pv = this.goal; this.vel = 0; }
     else {
-      var k = 4.2, x0 = this.pv - this.goal, v0 = this.vel, ek = Math.exp(-k * s), tmp = (v0 + k * x0) * s;
+      var k = 5.6, x0 = this.pv - this.goal, v0 = this.vel, ek = Math.exp(-k * s), tmp = (v0 + k * x0) * s;
       this.pv = this.goal + (x0 + tmp) * ek;
       this.vel = (v0 - k * tmp) * ek;
       if (Math.abs(this.pv - this.goal) < .0005 && Math.abs(this.vel) < .001) { this.pv = this.goal; this.vel = 0; }
@@ -4594,7 +4621,7 @@ I46.BANDS_RAW={
 
     // chromosome transforms (spread in the nucleus → karyotype)
     var arrangeRaw = (pv - 3.1) / .95, bodyFade = R(pv, 2.7, 2.96);
-    var nonT = 1 - R(pv, 4.2, 4.55), tgtFade = 1 - R(pv, 4.8, 5.04);
+    var nonT = 1 - R(pv, 4.2, 4.55), tgtFade = 1 - R(pv, 4.62, 4.9);
     var tq = this.Q2, id = new THREE.Quaternion();
     this.bodies.forEach(function (b, i) {
       var u = b.u = M.easeInOut(M.clamp((arrangeRaw - b.st * .35) / .65, 0, 1));
@@ -4617,19 +4644,36 @@ I46.BANDS_RAW={
     // threads
     var thA = R(pv, 1.5, 1.95), thOut = 1 - R(pv, 2.8, 2.97);
     this.threads.visible = thA * thOut > .01;
-    var tu = this.threadMat.uniforms;
-    tu.uCond.value = M.easeInOut(R(pv, 2.15, 2.95)); tu.uTime.value = t; tu.uFade.value = Math.min(thA, thOut);
+    var tu = this.threadMat.uniforms, cond = M.easeInOut(R(pv, 2.15, 2.95));
+    tu.uCond.value = cond; tu.uTime.value = t; tu.uFade.value = Math.min(thA, thOut);
+    // each territory glows softly in its chromosome's colour, like a chromosome-painting image
+    var gl3 = this.glow, terrA = Math.min(thA, thOut) * (1 - cond);
+    gl3.begin();
+    if (terrA > .01 && !dark) this.bodies.forEach(function (b) {
+      var c = GL.rgb(CH.paint(b.c, dark)), r = b.terrR;
+      gl3.quad(b.terr.x, b.terr.y, b.terr.z - r * .6, 0, r * .35, r * .35, r * .95, c[0], c[1], c[2], .16 * terrA);
+    });
+    gl3.end();
 
-    // chromosomes
+    // chromosomes (a calmer surface than the stage uses, so bloom doesn't make them sparkle)
     var bt = this.batch;
-    bt.setBump(CW * .5 * GL.R0);
+    bt.setBump(CW * .5 * GL.R0, .45);
     bt.begin();
     var spot = R(pv, 4.05, 4.45), focusC = GL.rgb(dark ? '#8FA3FF' : '#3346C7');
+    // Brightfield: the classic purple G-bands throughout. Fluorescence: each chromosome glows in its
+    // painted colour; as they line up into the karyotype their bands appear as darker stripes,
+    // because a karyotype is sorted by size and band pattern.
+    var kBand = dark ? M.easeInOut(R(pv, 3.25, 3.85)) : 1, deep = GL.rgb('#060914'), wht = [1, 1, 1], tmp = this._ctmp || (this._ctmp = [0, 0, 0]);
+    var colorFn = dark ? function (tag) {
+      var p = GL.rgb(CH.paint(tag.c, true)), to = tag.st === 'c' ? wht : deep, k = tag.st === 'c' ? .14 : Math.min(.8, (BANDK[tag.st] || 0) * (.26 + 1.1 * kBand));
+      tmp[0] = p[0] + (to[0] - p[0]) * k; tmp[1] = p[1] + (to[1] - p[1]) * k; tmp[2] = p[2] + (to[2] - p[2]) * k;
+      return tmp;
+    } : null;
     this.bodies.forEach(function (b) {
       if (b.fade <= .01) return;
       self.M4.compose(b.p, b.q, self.S3.set(1, 1, 1));
       var isT = b === self.target && spot > 0;
-      GL.drawPrims(bt, b.pr, self.M4, { style: dark ? 'paint' : 'bands', dark: dark, fade: b.fade, emit: dark ? .16 + (isT ? .35 * spot : 0) : 0, tint: isT ? focusC : null, tintK: isT ? .45 * spot : 0, x: 1 - b.u });
+      GL.drawPrims(bt, b.pr, self.M4, { style: 'bands', dark: dark, colorFn: colorFn, fade: b.fade, emit: dark ? .16 + (isT ? .35 * spot : 0) : 0, tint: isT ? focusC : null, tintK: isT ? .45 * spot : 0, x: 1 - b.u });
     });
     bt.end();
 
@@ -4664,7 +4708,9 @@ I46.BANDS_RAW={
 
   Journey3D.prototype.theme = function (dark, bg) {
     this.fog.color.set(bg);
-    this.batch.theme(dark); this.dust.theme(dark);
+    this.batch.theme(dark); this.dust.theme(dark); this.glow.theme(dark);
+    // fades here are quiet: no bright glowing edge on the dissolve (it read as a glitch under bloom)
+    this.batch.u.uEdge.value.setRGB(dark ? .16 : .05, dark ? .18 : .03, dark ? .28 : .08);
     var add = dark ? THREE.AdditiveBlending : THREE.NormalBlending;
     this.memMat.blending = add; this.nucMat.blending = add;
     this.memMat.uniforms.uCol.value.set(dark ? '#5B7BFF' : '#6A4AA8');
@@ -4675,7 +4721,8 @@ I46.BANDS_RAW={
     kinds.forEach(function (kd, i) { var c = GL.rgb(kd ? (dark ? '#22E0B8' : '#0B8A6B') : (dark ? '#FF8F3A' : '#C0641A')); oc.set(c, i * 3); });
     this.orgs.instanceColor.needsUpdate = true;
     var cols = this.tA.col.array;
-    this.bodies.forEach(function (b, i) { cols.set(GL.rgb(CH.paint(b.c, dark)), i * 3); });
+    // Brightfield paint colours are deep (for contrast on white); lift them a little for the fine threads
+    this.bodies.forEach(function (b, i) { cols.set(GL.rgb(dark ? CH.paint(b.c, true) : C.mix(CH.paint(b.c, false), '#FFFFFF', .34)), i * 3); });
     this.tA.col.needsUpdate = true;
     this.threadMat.uniforms.uDark.value = dark ? 1 : 0;
     var h = this.helix, bc = BASES[dark ? 'dark' : 'light'];
@@ -7870,7 +7917,7 @@ I46.BANDS_RAW={
       html: 'Before a cell divides, each thread copies itself and coils up tight. Now each chromosome looks like an X: two identical copies, called sister chromatids, joined at the [[centromere]].' },
     { title: 'Line them up in pairs', layer: 'journey', arg: 4,
       html: 'Scientists photograph the chromosomes and sort them into pairs by size and by their stripes, called [[bands|band]]. This picture is a [[karyotype]]: 22 numbered pairs plus two sex chromosomes. This person\'s sex chromosomes are X and Y.',
-      note: 'The colors come from a technique called chromosome painting. Switch to the Brightfield view to see the classic purple stain.' },
+      note: 'Brightfield view shows the classic purple stain that makes the bands visible. Fluorescence view gives each chromosome its own glowing color, like the lab technique called chromosome painting, with its bands as darker stripes.' },
     { title: 'One set from each parent', layer: 'parents',
       html: 'An egg and a sperm each carry 23 chromosomes. When they join, the new cell has 46: one of every pair from Mom and one from Dad.' },
     { title: 'Each chromosome is one long DNA molecule', layer: 'journey', arg: 5,
